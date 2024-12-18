@@ -1,0 +1,337 @@
+
+setwd("C:/Users/ehtis/OneDrive - New Mexico State University/SUNNY/Research Projects/Mechanical Harvest Projects/Genomic Prediction/BLUP")
+mydata <- read.csv("mydata.csv")
+
+str(mydata)
+print(mydata)
+
+mydata$Block <- as.factor(mydata$Block)
+mydata$Genotype <- as.factor(mydata$Genotype)
+mydata$row <- as.factor(mydata$row)
+mydata$column <- as.factor(mydata$column)
+
+mydata$Perimeter <- as.numeric(mydata$Perimeter)
+mydata$Area <- as.numeric(mydata$Area)
+mydata$Width.Mid.height <- as.numeric(mydata$Width.Mid.height)
+mydata$Height.Mid.width <- as.numeric(mydata$Height.Mid.width)
+mydata$Maximum.Height <- as.numeric(mydata$Maximum.Height)
+mydata$Maximum.Width <- as.numeric(mydata$Maximum.Width)
+
+
+
+length(unique(mydata$Genotype)) # number of Genotypes
+length(levels(mydata$Block)) # number of blocks
+length(levels(mydata$row)) # number of rows
+length(levels(mydata$column)) # number of columns 
+
+summary(mydata)
+colnames(mydata)
+
+mydata$check <- dplyr::recode_factor(mydata$Genotype, 
+                                       "CHECK1" = "control", 
+                                       "CHECK2" = "control", 
+                                       "CHECK3" = "control",
+                                       .default = "test")
+
+unique(mydata$check)
+
+# Check the completeness of the grid. Every RxC should have a value or NA if missing 
+table(mydata$row, mydata$column)  
+
+
+library(asreml)
+
+# MODELS WIHTOUT ROWS ANS COLUMNS 
+
+# Model for fixed effects = BLUEs 
+model <- asreml::asreml(fixed = mydata$Perimeter ~ 1 + at(check, "control"):Genotype, 
+                     random = ~ + Block + at(check, "test"):Genotype, 
+                     residual = ~idv(units), 
+                     data = mydata, 
+                     na.action = list(x = "include", y = "include"))
+plot(model)
+summary(model)
+summary(model)$varcomp
+
+# heritability
+vg <- vpredict(model, VG ~ V2)
+h2 <- vpredict(model, h2 ~ V2 / (V1 + V2 + V3 + V4))
+print(h2)
+
+# BLUE for genotypes 
+predsTest <- predict.asreml(model, classify='check:Genotype',  levels = list(check = "test"), vcov=TRUE)$pvals
+print(predsTest)
+
+colnames(predsTest) <- c("check", "Genotype", "BLUE", "std.error", "status")
+# The weight is required for second phase of the analysis
+predsTest$weight <- 1/(predsTest$std.error)^2
+print(predsTest)
+
+write.csv(predsTest, "predsTest_Perimeter.csv", row.names = FALSE)
+
+
+# BLUE for checks 
+predsCheck <- predict.asreml(model, classify='check:Genotype', vcov=TRUE, aliased = TRUE)$pvals
+print(predsCheck)
+
+# The weight is required for second phase of the analysis
+predsCheck$weight <- 1/(predsCheck$std.error)^2
+print(predsCheck)
+
+# LOOP FOR MULTIPLE TRAITS 
+
+# Extract numeric trait columns dynamically
+numeric_traits <- names(mydata)[sapply(mydata, is.numeric)]
+numeric_traits <- numeric_traits[!numeric_traits %in% c("row", "column")]
+
+# Create empty data frames to store heritability results and combined predictions
+heritability_results <- data.frame(
+  Trait = character(),
+  Heritability = numeric(),
+  VG = numeric(),
+  stringsAsFactors = FALSE
+)
+
+predictions_test <- data.frame(
+  Trait = character(),
+  check = character(),
+  Genotype = character(),
+  BLUE = numeric(),
+  std.error = numeric(),
+  status = character(),
+  weight = numeric(),
+  stringsAsFactors = FALSE
+)
+
+predictions_check <- data.frame(
+  Trait = character(),
+  check = character(),
+  Genotype = character(),
+  BLUE = numeric(),
+  std.error = numeric(),
+  status = character(),
+  weight = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through each numeric trait
+for (trait in numeric_traits) {
+  cat("Processing", trait, "...\n")
+  
+  # Update the formula dynamically for the current trait
+  formula_fixed <- as.formula(paste0("mydata$", trait, " ~ 1 + at(check, 'control'):Genotype"))
+  
+  # Fit the model for the current trait
+  model <- asreml::asreml(
+    fixed = formula_fixed,
+    random = ~ + Block + at(check, "test"):Genotype,
+    residual = ~idv(units),
+    data = mydata,
+    na.action = list(x = "include", y = "include")
+  )
+  
+  # Heritability calculation
+  vg <- vpredict(model, VG ~ V2)
+  h2 <- vpredict(model, h2 ~ V2 / (V1 + V2 + V3 + V4))
+  cat("Heritability for", trait, ":", h2$Estimate, "\n")
+  
+  # Append heritability result to the data frame
+  heritability_results <- rbind(
+    heritability_results,
+    data.frame(
+      Trait = trait,
+      Heritability = h2$Estimate,
+      VG = vg$Estimate
+    )
+  )
+  
+  # Predict BLUEs for test genotypes
+  preds_test <- predict.asreml(
+    model,
+    classify = "check:Genotype",
+    levels = list(check = "test"),
+    vcov = TRUE
+  )$pvals
+  
+  colnames(preds_test) <- c("check", "Genotype", "BLUE", "std.error", "status")
+  preds_test$weight <- 1 / (preds_test$std.error)^2
+  preds_test$Trait <- trait  # Add the current trait name
+  predictions_test <- rbind(predictions_test, preds_test)
+  
+  # Predict BLUEs for checks
+  preds_check <- predict.asreml(
+    model,
+    classify = "check:Genotype",
+    vcov = TRUE
+  )$pvals
+  
+  colnames(preds_check) <- c("check", "Genotype", "BLUE", "std.error", "status")
+  preds_check$weight <- 1 / (preds_check$std.error)^2
+  preds_check$Trait <- trait  # Add the current trait name
+  predictions_check <- rbind(predictions_check, preds_check)
+}
+
+# Save the heritability results to a CSV file
+write.csv(heritability_results, "heritability_results.csv", row.names = FALSE)
+cat("Heritability results saved to heritability_results.csv\n")
+
+# Save predictions for test genotypes to a CSV file
+write.csv(predictions_test, "predictions_test.csv", row.names = FALSE)
+cat("Predictions for test genotypes saved to predictions_test.csv\n")
+
+# Save predictions for checks to a separate CSV file
+write.csv(predictions_check, "predictions_check.csv", row.names = FALSE)
+cat("Predictions for checks saved to predictions_check.csv\n")
+
+
+# MODELS WIH ROWS ANS COLUMNS 
+
+# Model for fixed effects = BLUEs 
+model_RC <- asreml::asreml(fixed = mydata$Perimeter ~ 1 + at(check, "control"):Genotype, 
+                      random = ~ + Block + at(check, "test"):Genotype + spl(row), 
+                      residual = ~ar1(row):ar2(column), 
+                      data = mydata, 
+                      na.action = list(x = "include", y = "include"))
+
+summary.asreml(model_RC)
+plot(model_RC)
+summary(model_RC)$varcomp
+
+# heritability
+vg <- vpredict(model_RC, VG ~ V3)
+h2 <- vpredict(model_RC, h2 ~ V2 / (V1 + V2 + V3 + V4 + V5 + V6))
+print(h2)
+
+# BLUE for genotypes 
+preds_RC_Test <- predict.asreml(model_RC, classify='check:Genotype',  levels = list(check = "test"), vcov=TRUE)$pvals
+print(preds_RC_Test)
+
+colnames(preds_RC_Test) <- c("check", "Genotype", "BLUE", "std.error", "status")
+# The weight is required for second phase of the analysis
+preds_RC_Test$weight <- (1/preds_RC_Test$std.error)^2
+print(preds_RC_Test)
+
+write.csv(preds_RC_Test, "preds_RC_Test_Perimeter.csv", row.names = FALSE)
+
+
+# BLUE for checks 
+preds_RC_Check <- predict.asreml(model_RC, classify='check:Genotype', vcov=TRUE, aliased = TRUE)$pvals
+print(preds_RC_Check)
+
+colnames(preds_RC_Check) <- c("check", "Genotype", "BLUE", "std.error", "status")
+
+# The weight is required for second phase of the analysis
+preds_RC_Check$weight <- 1/(preds_RC_Check$std.error)^2
+print(preds_RC_Check)
+
+write.csv(preds_RC_Check, "preds_RC_Check_Perimeter.csv", row.names = FALSE)
+
+# LOOP FOR THE ROWS AND COLUMN ANALYSES 
+
+# Extract numeric trait columns dynamically
+numeric_traits <- names(mydata)[sapply(mydata, is.numeric)]
+numeric_traits <- numeric_traits[!numeric_traits %in% c("row", "column")]
+
+# Create empty data frames to store heritability results and combined predictions
+heritability_results <- data.frame(
+  Trait = character(),
+  Heritability = numeric(),
+  VG = numeric(),
+  stringsAsFactors = FALSE
+)
+
+combined_predictions_test <- data.frame(
+  Trait = character(),
+  check = character(),
+  Genotype = character(),
+  BLUE = numeric(),
+  std.error = numeric(),
+  status = character(),
+  weight = numeric(),
+  stringsAsFactors = FALSE
+)
+
+combined_predictions_check <- data.frame(
+  Trait = character(),
+  check = character(),
+  Genotype = character(),
+  BLUE = numeric(),
+  std.error = numeric(),
+  status = character(),
+  weight = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through each numeric trait
+for (trait in numeric_traits) {
+  cat("Processing", trait, "...\n")
+  
+  # Update the formula dynamically for the current trait
+  formula_fixed <- as.formula(paste0("mydata$", trait, " ~ 1 + at(check, 'control'):Genotype"))
+  
+  # Fit the model for the current trait
+  model_RC <- asreml::asreml(
+    fixed = formula_fixed,
+    random = ~ + Block + at(check, "test"):Genotype + spl(row),
+    residual = ~ar1(row):ar2(column),
+    data = mydata,
+    na.action = list(x = "include", y = "include")
+  )
+  
+  # Heritability calculation
+  vg <- vpredict(model_RC, VG ~ V3)
+  h2 <- vpredict(model_RC, h2 ~ V2 / (V1 + V2 + V3 + V4 + V5 + V6))
+  cat("Heritability for", trait, ":", h2$Estimate, "\n")
+  
+  # Append heritability result to the data frame
+  heritability_results <- rbind(
+    heritability_results,
+    data.frame(
+      Trait = trait,
+      Heritability = h2$Estimate,
+      VG = vg$Estimate
+    )
+  )
+  
+  # Predict BLUEs for genotypes (test)
+  preds_RC_Test <- predict.asreml(
+    model_RC,
+    classify = "check:Genotype",
+    levels = list(check = "test"),
+    vcov = TRUE
+  )$pvals
+  
+  colnames(preds_RC_Test) <- c("check", "Genotype", "BLUE", "std.error", "status")
+  preds_RC_Test$weight <- 1 / (preds_RC_Test$std.error)^2
+  preds_RC_Test$Trait <- trait
+  
+  # Combine test predictions
+  combined_predictions_test <- rbind(combined_predictions_test, preds_RC_Test)
+  
+  # Predict BLUEs for checks
+  preds_RC_Check <- predict.asreml(
+    model_RC,
+    classify = "check:Genotype",
+    vcov = TRUE,
+    aliased = TRUE
+  )$pvals
+  
+  colnames(preds_RC_Check) <- c("check", "Genotype", "BLUE", "std.error", "status")
+  preds_RC_Check$weight <- 1 / (preds_RC_Check$std.error)^2
+  preds_RC_Check$Trait <- trait
+  
+  # Combine check predictions
+  combined_predictions_check <- rbind(combined_predictions_check, preds_RC_Check)
+}
+
+# Save the heritability results to a CSV file
+write.csv(heritability_results, "heritability_results_RC.csv", row.names = FALSE)
+cat("Heritability results saved to heritability_results_RC.csv\n")
+
+# Save the combined predictions for genotypes (test) to a CSV file
+write.csv(combined_predictions_test, "combined_predictions_test_RC.csv", row.names = FALSE)
+cat("Combined test predictions saved to combined_predictions_test_RC.csv\n")
+
+# Save the combined predictions for checks to a CSV file
+write.csv(combined_predictions_check, "combined_predictions_check_RC.csv", row.names = FALSE)
+cat("Combined check predictions saved to combined_predictions_check_RC.csv\n")
